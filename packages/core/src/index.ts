@@ -65,6 +65,8 @@ export const DEFAULTS = {
 	delegate: () => document.documentElement,
 };
 
+const MATRIX_REGEX = /matrix\(([^)]+)\)/;
+
 export class DraggableFactory {
 	#instances = new Map<HTMLElement | SVGElement, DraggableInstance>();
 	#listeners_initialized = false;
@@ -572,24 +574,57 @@ export class DraggableFactory {
 
 	#calculate_inverse_scale(instance: DraggableInstance) {
 		const draggable_node = instance.ctx.rootNode;
-		let inverse_scale = 1;
+		let cumulative_scale = 1;
+
+		// Walk up the DOM tree to find all scale transforms
+		let current_element = draggable_node.parentElement;
+
+		while (current_element && current_element !== document.body) {
+			const computed_style = window.getComputedStyle(current_element);
+			const transform = computed_style.transform;
+
+			if (transform && transform !== 'none') {
+				// Parse the matrix to extract scale
+				const matrix_match = transform.match(MATRIX_REGEX);
+				if (matrix_match) {
+					const values = matrix_match[1].split(',').map((v) => parseFloat(v.trim()));
+					if (values.length >= 6) {
+						// For 2D transforms: matrix(a, b, c, d, e, f)
+						// Scale X = sqrt(a² + b²), Scale Y = sqrt(c² + d²)
+						const scale_x = Math.sqrt(values[0] * values[0] + values[1] * values[1]);
+						const scale_y = Math.sqrt(values[2] * values[2] + values[3] * values[3]);
+
+						// Use the average of X and Y scales (or just X if they're uniform)
+						cumulative_scale *= scale_x;
+					}
+				}
+			}
+
+			current_element = current_element.parentElement;
+		}
+
+		// Apply the original inverse scale calculation for the element itself
+		let element_inverse_scale = 1;
 
 		if (draggable_node instanceof SVGElement) {
 			const bbox = (draggable_node as SVGGraphicsElement).getBBox();
 			const rect = instance.ctx.cachedRootNodeRect;
 			if (bbox.width && rect.width) {
-				inverse_scale = bbox.width / rect.width;
+				element_inverse_scale = bbox.width / rect.width;
 			}
 		} else {
-			// @ts-ignore
-			inverse_scale = draggable_node.offsetWidth / instance.ctx.cachedRootNodeRect.width;
+			element_inverse_scale =
+				(draggable_node as HTMLElement).offsetWidth / instance.ctx.cachedRootNodeRect.width;
 		}
 
-		if (isNaN(inverse_scale) || inverse_scale <= 0) {
-			inverse_scale = 1;
+		if (isNaN(element_inverse_scale) || element_inverse_scale <= 0) {
+			element_inverse_scale = 1;
 		}
 
-		return inverse_scale;
+		// Combine both scales
+		const final_inverse_scale = element_inverse_scale / cumulative_scale;
+
+		return isNaN(final_inverse_scale) || final_inverse_scale <= 0 ? 1 : final_inverse_scale;
 	}
 
 	#destroy_instance(instance: DraggableInstance) {
